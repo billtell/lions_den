@@ -11,6 +11,7 @@ from datetime import date, datetime
 # ── Favicon (user-supplied favicon.png, falls back to emoji) ──────────────────
 try:
     _icon = Image.open("lions_den_favicon.png")
+    _icon.thumbnail((64, 64))   # Resize in-memory to favicon dimensions
 except FileNotFoundError:
     _icon = "🦁"
 
@@ -487,9 +488,10 @@ if st.session_state.get("current_mix") is not None:
             column_config={
                 "Artist": st.column_config.TextColumn("Artist", help="Fix typos here"),
                 "Song":   st.column_config.TextColumn("Song",   help="Fix typos here"),
-                "Album":  st.column_config.TextColumn("Album",  disabled=True),
-                "Year":   st.column_config.NumberColumn("Year", disabled=True, format="%d"),
+                "Album":  st.column_config.TextColumn("Album"),
+                "Year":   st.column_config.NumberColumn("Year", format="%d"),
             },
+            disabled=["Album", "Year"],   # widget-level disable, not column_config
             use_container_width=True,
             hide_index=True,
             key="mix_editor",
