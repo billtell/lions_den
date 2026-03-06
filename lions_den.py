@@ -488,10 +488,9 @@ if st.session_state.get("current_mix") is not None:
             column_config={
                 "Artist": st.column_config.TextColumn("Artist", help="Fix typos here"),
                 "Song":   st.column_config.TextColumn("Song",   help="Fix typos here"),
-                "Album":  st.column_config.TextColumn("Album"),
-                "Year":   st.column_config.NumberColumn("Year", format="%d"),
+                "Album":  st.column_config.TextColumn("Album", disabled=True),
+                "Year":   st.column_config.NumberColumn("Year", format="%d", disabled=True),
             },
-            disabled=["Album", "Year"],   # widget-level disable, not column_config
             use_container_width=True,
             hide_index=True,
             key="mix_editor",
