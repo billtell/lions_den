@@ -1,3 +1,4 @@
+from PIL import Image
 import streamlit as st
 import pandas as pd
 import spotipy
@@ -5,12 +6,18 @@ from spotipy.oauth2 import SpotifyOAuth
 from spotipy.cache_handler import CacheHandler
 from typing import Optional
 import time
-from datetime import date
+from datetime import date, datetime
+
+# ── Favicon (user-supplied favicon.png, falls back to emoji) ──────────────────
+try:
+    _icon = Image.open("lions_den_favicon.png")
+except FileNotFoundError:
+    _icon = "🦁"
 
 # ── Must be the very first Streamlit call ──────────────────────────────────────
 st.set_page_config(
     page_title="Lion's Den Playlist Generator",
-    page_icon="🦁",
+    page_icon=_icon,
     layout="centered",
 )
 
@@ -147,7 +154,7 @@ if "auth_manager" not in st.session_state:
         redirect_uri=REDIRECT_URI,
         scope="playlist-modify-public playlist-modify-private",
         cache_handler=SessionStateCacheHandler(),
-        show_dialog=True,   # always show the Spotify consent screen
+        show_dialog=True,
     )
 
 auth_manager: SpotifyOAuth = st.session_state["auth_manager"]
@@ -198,13 +205,12 @@ def get_valid_token() -> Optional[dict]:
     return token
 
 
-# ── CSV loading & deduplication ───────────────────────────────────────────────
+# ── CSV loading & deduplication (runs once, cached permanently) ───────────────
 
 @st.cache_data(show_spinner=False)
-def load_data(path: str = "lions_den_complete.csv") -> "tuple[pd.DataFrame, int]":
-    """Load and deduplicate the track CSV. Returns (clean_df, original_row_count)."""
+def load_data(path: str = "lions_den_complete.csv") -> pd.DataFrame:
+    """Load and deduplicate the track CSV. Returns clean unique DataFrame."""
     df = pd.read_csv(path)
-    original_count = len(df)
 
     df["_artist_norm"] = df["artist"].str.strip().str.lower()
     df["_song_norm"]   = df["song"].str.strip().str.lower()
@@ -214,14 +220,37 @@ def load_data(path: str = "lions_den_complete.csv") -> "tuple[pd.DataFrame, int]
     df["artist"] = df["artist"].str.strip()
     df["song"]   = df["song"].str.strip()
 
-    return df.reset_index(drop=True), original_count
+    return df.reset_index(drop=True)
+
+
+# ── Archive stats (computed once from deduplicated data) ──────────────────────
+
+@st.cache_data(show_spinner=False)
+def get_stats(df: pd.DataFrame) -> dict:
+    """Compute interesting archive highlights from the deduplicated DataFrame."""
+    years        = df["album_year"].dropna().astype(int)
+    top_artists  = df["artist"].value_counts().head(5)
+    decade_counts = (years // 10 * 10).value_counts().sort_index()
+    decade_labels = {d: f"{d}s" for d in decade_counts.index}
+    top_decade   = int(decade_counts.idxmax())
+
+    return {
+        "unique_songs":   len(df),
+        "unique_artists": df["artist"].nunique(),
+        "year_min":       int(years.min()),
+        "year_max":       int(years.max()),
+        "top_artists":    top_artists,
+        "decade_counts":  decade_counts.rename(index=decade_labels),
+        "top_decade":     top_decade,
+    }
 
 
 # ── Step 1: Pre-screen tracks (search only, no playlist created) ───────────────
 
 def screen_tracks(sp: spotipy.Spotify, selection: pd.DataFrame):
-    """Search Spotify for each track and store results in session state."""
-    results   = []
+    """Search Spotify for each track and store results in session state.
+    Expects columns: artist, song, album, album_year."""
+    results    = []
     found_uris = []
 
     total    = len(selection)
@@ -252,7 +281,7 @@ def screen_tracks(sp: spotipy.Spotify, selection: pd.DataFrame):
                     "Year":   row["album_year"],
                     "_uri":   None,
                 })
-        except Exception as e:
+        except Exception:
             results.append({
                 "":       "⚠️",
                 "Artist": row["artist"],
@@ -328,7 +357,7 @@ if not token:
 # ── Logged in — build Spotify client ──────────────────────────────────────────
 sp = spotipy.Spotify(auth=token["access_token"])
 
-# Sidebar: user profile + logout
+# ── Sidebar: user profile + logout + diagnostics ──────────────────────────────
 with st.sidebar:
     try:
         user         = sp.current_user()
@@ -348,9 +377,8 @@ with st.sidebar:
             st.session_state.pop(key, None)
         st.rerun()
 
-    # ── Diagnostics ──────────────────────────────────────────────────────────
     with st.expander("🔧 Diagnostics"):
-        raw_token = st.session_state.get("spotify_token", {})
+        raw_token      = st.session_state.get("spotify_token", {})
         granted_scopes = set(raw_token.get("scope", "").split())
         needed_scopes  = {"playlist-modify-public", "playlist-modify-private"}
 
@@ -367,7 +395,6 @@ with st.sidebar:
 
         exp = raw_token.get("expires_at")
         if exp:
-            from datetime import datetime
             exp_dt  = datetime.fromtimestamp(exp)
             remains = max(0, int(exp - time.time()))
             st.markdown(f"**Token expires:** {exp_dt.strftime('%H:%M:%S')} ({remains}s remaining)")
@@ -378,17 +405,39 @@ with st.sidebar:
                 st.session_state.pop(key, None)
             st.rerun()
 
-# ── Track stats ────────────────────────────────────────────────────────────────
+# ── Load archive ───────────────────────────────────────────────────────────────
 with st.spinner("Loading track archive…"):
-    df, original_count = load_data()
+    df    = load_data()
+    stats = get_stats(df)
 
-unique_count = len(df)
-removed      = original_count - unique_count
+# ── Archive highlights ─────────────────────────────────────────────────────────
+st.markdown("### 📊 Archive Highlights")
 
 col_a, col_b, col_c = st.columns(3)
-col_a.metric("Total entries",      f"{original_count:,}")
-col_b.metric("Unique tracks",      f"{unique_count:,}")
-col_c.metric("Duplicates removed", f"{removed:,}")
+col_a.metric("Unique Tracks",   f"{stats['unique_songs']:,}")
+col_b.metric("Unique Artists",  f"{stats['unique_artists']:,}")
+col_c.metric("Year Range",      f"{stats['year_min']} – {stats['year_max']}")
+
+st.markdown("")
+
+col_left, col_right = st.columns(2)
+
+with col_left:
+    st.markdown("**🎸 Top 5 Artists**")
+    top_df = stats["top_artists"].reset_index()
+    top_df.columns = ["Artist", "Tracks"]
+    st.dataframe(top_df, use_container_width=True, hide_index=True)
+
+with col_right:
+    st.markdown(
+        f"**📅 Songs by Decade**  \n"
+        f"<span style='color:#aaa;font-size:0.85em'>Most represented: "
+        f"{stats['top_decade']}s</span>",
+        unsafe_allow_html=True,
+    )
+    decade_df = stats["decade_counts"].rename("Tracks").reset_index()
+    decade_df.columns = ["Decade", "Tracks"]
+    st.bar_chart(decade_df.set_index("Decade"), color="#f5a623", use_container_width=True)
 
 st.markdown("---")
 
@@ -400,19 +449,17 @@ st.markdown("")
 # ── Generate / Regenerate ──────────────────────────────────────────────────────
 if st.button("🎲 Generate Mix", use_container_width=True):
     st.session_state["current_mix"]       = df.sample(10).reset_index(drop=True)
-    # Clear any previous screening results when a new mix is generated
     st.session_state.pop("screened_results", None)
     st.session_state.pop("screened_uris",    None)
     st.session_state.pop("playlist_url",     None)
 
 # ── Show current mix ───────────────────────────────────────────────────────────
 if st.session_state.get("current_mix") is not None:
-    mix = st.session_state["current_mix"]
-
+    mix      = st.session_state["current_mix"]
     screened = st.session_state.get("screened_results")
 
     if screened:
-        # Show results table with availability status
+        # ── Post-screening: show results with availability status (read-only)
         st.markdown("### Availability Check")
         display_df = pd.DataFrame(screened).drop(columns=["_uri"])
         st.dataframe(display_df, use_container_width=True, hide_index=True)
@@ -424,17 +471,28 @@ if st.session_state.get("current_mix") is not None:
         c2.metric("Not available",        not_found)
 
     else:
-        # Show plain mix table before screening
+        # ── Pre-screening: editable table so users can fix typos
         st.markdown("### Your Mix")
-        st.dataframe(
-            mix[["artist", "song", "album", "album_year"]].rename(columns={
-                "artist":     "Artist",
-                "song":       "Song",
-                "album":      "Album",
-                "album_year": "Year",
-            }),
+        st.caption("✏️ Edit **Artist** or **Song** to fix typos before checking availability.")
+
+        mix_display = mix[["artist", "song", "album", "album_year"]].rename(columns={
+            "artist":     "Artist",
+            "song":       "Song",
+            "album":      "Album",
+            "album_year": "Year",
+        })
+
+        edited_display = st.data_editor(
+            mix_display,
+            column_config={
+                "Artist": st.column_config.TextColumn("Artist", help="Fix typos here"),
+                "Song":   st.column_config.TextColumn("Song",   help="Fix typos here"),
+                "Album":  st.column_config.TextColumn("Album",  disabled=True),
+                "Year":   st.column_config.NumberColumn("Year", disabled=True, format="%d"),
+            },
             use_container_width=True,
             hide_index=True,
+            key="mix_editor",
         )
 
     st.markdown("---")
@@ -442,19 +500,26 @@ if st.session_state.get("current_mix") is not None:
     found_uris = st.session_state.get("screened_uris")
 
     if not screened:
-        # Step 1 button: check availability
+        # Step 1: check availability using the (possibly edited) mix
         if st.button("🔍 Check Availability on Spotify", use_container_width=True):
             token = get_valid_token()
             if token:
+                # Convert display column names back to internal names for screen_tracks()
+                to_screen = edited_display.rename(columns={
+                    "Artist": "artist",
+                    "Song":   "song",
+                    "Album":  "album",
+                    "Year":   "album_year",
+                })
                 sp = spotipy.Spotify(auth=token["access_token"])
-                screen_tracks(sp, mix)
+                screen_tracks(sp, to_screen)
                 st.rerun()
             else:
                 st.error("Session expired — please log in again.")
                 st.rerun()
 
     elif found_uris:
-        # Step 2 button: create playlist (only shown after screening finds ≥1 track)
+        # Step 2: create playlist with already-found URIs
         if st.button(
             f"🎵 Create Playlist with {len(found_uris)} track{'s' if len(found_uris) != 1 else ''}",
             use_container_width=True,
@@ -467,7 +532,6 @@ if st.session_state.get("current_mix") is not None:
                 st.error("Session expired — please log in again.")
                 st.rerun()
 
-        # Re-screen button in case user wants to retry
         if st.button("🔄 Re-check Availability", use_container_width=True):
             st.session_state.pop("screened_results", None)
             st.session_state.pop("screened_uris",    None)
@@ -480,6 +544,5 @@ if st.session_state.get("current_mix") is not None:
             st.session_state.pop("screened_uris",    None)
             st.rerun()
 
-    # Persist playlist link across reruns
     if st.session_state.get("playlist_url"):
         st.markdown(f"**Last export:** [Open in Spotify]({st.session_state['playlist_url']})")
